@@ -2,16 +2,18 @@ package documentloaders
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/ledongthuc/pdf"
+
 	"github.com/tmc/langchaingo/schema"
 	"github.com/tmc/langchaingo/textsplitter"
 )
 
 // PDF loads text data from an io.Reader.
 type PDF struct {
-	r        io.ReaderAt
+	r        io.Reader
 	s        int64
 	password string
 }
@@ -28,20 +30,20 @@ func WithPassword(password string) PDFOptions {
 	}
 }
 
-// NewText creates a new text loader with an io.Reader.
-func NewPDF(r io.ReaderAt, size int64, opts ...PDFOptions) PDF {
-	pdf := PDF{
+// NewPDF creates a new text loader with an io.Reader.
+func NewPDF(r io.Reader, size int64, opts ...PDFOptions) PDF {
+	_pdf := PDF{
 		r: r,
 		s: size,
 	}
 	for _, opt := range opts {
-		opt(&pdf)
+		opt(&_pdf)
 	}
-	return pdf
+	return _pdf
 }
 
 // getPassword returns the password for the PDF
-// it than clears the password on the struct so it can't be used again
+// it than clears the password on the struct, so it can't be used again
 // if the password is cleared and tried to be used again it will fail.
 func (p *PDF) getPassword() string {
 	pass := p.password
@@ -55,13 +57,19 @@ func (p PDF) Load(_ context.Context) ([]schema.Document, error) {
 	var reader *pdf.Reader
 	var err error
 
+	// converting io.Reader to io.ReaderAt
+	readerAt, err := newBufferedReaderAt(p.r)
+	if err != nil {
+		return nil, err
+	}
+
 	if p.password != "" {
-		reader, err = pdf.NewReaderEncrypted(p.r, p.s, p.getPassword)
+		reader, err = pdf.NewReaderEncrypted(readerAt, p.s, p.getPassword)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		reader, err = pdf.NewReader(p.r, p.s)
+		reader, err = pdf.NewReader(readerAt, p.s)
 		if err != nil {
 			return nil, err
 		}
@@ -110,4 +118,37 @@ func (p PDF) LoadAndSplit(ctx context.Context, splitter textsplitter.TextSplitte
 	}
 
 	return textsplitter.SplitDocuments(splitter, docs)
+}
+
+type bufferedReaderAt struct {
+	data   []byte
+	offset int64
+}
+
+// newBufferedReaderAt wrapper to convert io.Reader to io.ReaderAa
+func newBufferedReaderAt(reader io.Reader) (*bufferedReaderAt, error) {
+	buf, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+
+	return &bufferedReaderAt{
+		data:   buf,
+		offset: 0,
+	}, nil
+}
+
+// ReadAt io.ReaderAt interface method wrapper
+func (b bufferedReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
+	if off < 0 {
+		return 0, fmt.Errorf("negative offset")
+	}
+	if off >= int64(len(b.data)) {
+		return 0, io.EOF
+	}
+	n = copy(p, b.data[off:])
+	if n < len(p) {
+		err = io.EOF
+	}
+	return
 }
